@@ -1,0 +1,442 @@
+-- ===================================================================
+-- OpenCasino - слот-машина для OpenComputers
+-- Иконки: алмаз (diamond), звезда ада (netherstar), золото (gold), железо (iron)
+-- ===================================================================
+
+local component = require("component")
+local term = require("term")
+local event = require("event")
+local image = require("image")
+local fs = require("filesystem")
+local keyboard = require("keyboard")
+local serialization = require("serialization")
+
+local gpu = component.gpu
+
+-- ===================== НАСТРОЙКИ =====================
+
+local BALANCE_FILE = "/home/casino_balance.dat"
+local STARTING_BALANCE = 100
+
+local MIN_BET = 1
+local MAX_BET = 10
+local BET_STEP_SMALL = 1
+local BET_STEP_MED = 5
+local BET_STEP_BIG = 10
+
+-- Пути к иконкам - ЗАМЕНИ НА СВОИ ФАЙЛЫ
+local ICON_PATHS = {
+    diamond    = "/home/icons/diamond.pic",
+    netherstar = "/home/icons/netherstar.pic",
+    gold       = "/home/icons/gold.pic",
+    iron       = "/home/icons/iron.pic",
+}
+
+-- Множители за 3 одинаковых предмета (как в таблице на референсе)
+local TRIPLE_BONUS = {
+    iron       = 10,
+    gold       = 25,
+    diamond    = 40,
+    netherstar = 100,
+}
+
+-- Бонусы за частичные совпадения (универсальные, как на референсе)
+local EDGE_MATCH_BONUS = 1   -- 2 одинаковых по краям (1-й и 3-й слот)
+local ADJACENT_MATCH_BONUS = 2  -- 2 одинаковых рядом (1-2 или 2-3)
+
+-- Веса для случайного выбора (чем выше число, тем чаще выпадает)
+local ITEM_WEIGHTS = {
+    {id = "iron",       weight = 40},
+    {id = "gold",       weight = 30},
+    {id = "diamond",    weight = 20},
+    {id = "netherstar", weight = 10},
+}
+
+-- ===================== БАЛАНС =====================
+
+local balance = STARTING_BALANCE
+local currentBet = MIN_BET
+local totalWagered = 0
+local totalWon = 0
+
+local function loadBalance()
+    if fs.exists(BALANCE_FILE) then
+        local f = io.open(BALANCE_FILE, "r")
+        if f then
+            local data = f:read("*a")
+            f:close()
+            local ok, result = pcall(serialization.unserialize, data)
+            if ok and type(result) == "table" then
+                balance = result.balance or STARTING_BALANCE
+                totalWagered = result.totalWagered or 0
+                totalWon = result.totalWon or 0
+                return
+            end
+        end
+    end
+    balance = STARTING_BALANCE
+    totalWagered = 0
+    totalWon = 0
+end
+
+local function saveBalance()
+    local f = io.open(BALANCE_FILE, "w")
+    if f then
+        f:write(serialization.serialize({
+            balance = balance,
+            totalWagered = totalWagered,
+            totalWon = totalWon,
+        }))
+        f:close()
+    end
+end
+
+-- ===================== ИКОНКИ =====================
+
+local loadedIcons = {}
+
+local function loadIcons()
+    for id, path in pairs(ICON_PATHS) do
+        if fs.exists(path) then
+            local pic, err = image.load(path)
+            if pic then
+                loadedIcons[id] = pic
+            else
+                io.stderr:write("Не удалось загрузить иконку " .. id .. ": " .. tostring(err) .. "\n")
+            end
+        else
+            io.stderr:write("Файл иконки не найден: " .. path .. "\n")
+        end
+    end
+end
+
+-- ===================== СЛУЧАЙНЫЙ ВЫБОР ПРЕДМЕТА =====================
+
+local function pickRandomItem()
+    local totalWeight = 0
+    for _, item in ipairs(ITEM_WEIGHTS) do
+        totalWeight = totalWeight + item.weight
+    end
+
+    local roll = math.random(1, totalWeight)
+    local cumulative = 0
+    for _, item in ipairs(ITEM_WEIGHTS) do
+        cumulative = cumulative + item.weight
+        if roll <= cumulative then
+            return item.id
+        end
+    end
+
+    return ITEM_WEIGHTS[1].id
+end
+
+-- ===================== ЛОГИКА ВЫИГРЫША =====================
+
+-- reels = {item1, item2, item3}
+-- Возвращает (bonusMultiplier, winAmount)
+local function calculateWin(reels, bet)
+    local a, b, c = reels[1], reels[2], reels[3]
+
+    -- Три одинаковых - самый большой бонус
+    if a == b and b == c then
+        local bonus = TRIPLE_BONUS[a] or 0
+        return bonus, bet * bonus
+    end
+
+    -- Два одинаковых рядом (1-2 или 2-3) - бонус x2
+    if a == b or b == c then
+        return ADJACENT_MATCH_BONUS, bet * ADJACENT_MATCH_BONUS
+    end
+
+    -- Два одинаковых по краям (1-3) - бонус x1
+    if a == c then
+        return EDGE_MATCH_BONUS, bet * EDGE_MATCH_BONUS
+    end
+
+    return 0, 0
+end
+
+-- ===================== ИНТЕРФЕЙС / ОТРИСОВКА =====================
+
+local screenW, screenH = gpu.getResolution()
+
+-- Цвета в стиле референса (тёмный фон, синие рамки, голубой текст)
+local COLOR_BG = 0x000000
+local COLOR_BORDER = 0x0000FF
+local COLOR_TEXT = 0x55AAFF
+local COLOR_TEXT_DIM = 0xAAAAAA
+local COLOR_WHITE = 0xFFFFFF
+local COLOR_SLOT_BG = 0x1A1A1A
+local COLOR_SLOT_BORDER = 0x555555
+local COLOR_BUTTON_BG = 0x000033
+local COLOR_BUTTON_BORDER = 0x3399FF
+
+-- Координаты слотов (3 в ряд), подбери под разрешение своего экрана
+local SLOT_SIZE = 9       -- ширина/высота рамки слота в символах
+local SLOT_Y = 12
+local SLOT_GAP = 3
+local SLOT_START_X = math.floor(screenW / 2) - math.floor((SLOT_SIZE * 3 + SLOT_GAP * 2) / 2)
+
+local slotPositions = {
+    SLOT_START_X,
+    SLOT_START_X + SLOT_SIZE + SLOT_GAP,
+    SLOT_START_X + (SLOT_SIZE + SLOT_GAP) * 2,
+}
+
+-- Кнопки ставок: {label, deltaOrAction, x смещение от центра}
+local buttons = {}
+
+local function drawBox(x, y, w, h, borderColor, bgColor)
+    gpu.setBackground(bgColor)
+    for row = y, y + h - 1 do
+        gpu.set(x, row, string.rep(" ", w))
+    end
+
+    gpu.setForeground(borderColor)
+    gpu.setBackground(COLOR_BG)
+    gpu.set(x, y, "┌" .. string.rep("─", w - 2) .. "┐")
+    gpu.set(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘")
+    for row = y + 1, y + h - 2 do
+        gpu.set(x, row, "│")
+        gpu.set(x + w - 1, row, "│")
+    end
+end
+
+local function centerText(text, y, color)
+    local x = math.floor((screenW - #text) / 2) + 1
+    gpu.setForeground(color or COLOR_TEXT)
+    gpu.setBackground(COLOR_BG)
+    gpu.set(x, y, text)
+end
+
+local function drawHeader()
+    gpu.setBackground(COLOR_BG)
+    gpu.fill(1, 1, screenW, screenH, " ")
+
+    drawBox(1, 1, screenW, 3, COLOR_BORDER, COLOR_BG)
+    centerText("OpenCasino", 2, COLOR_WHITE)
+
+    centerText("Инфа о выигрышах:", 5, COLOR_TEXT)
+    centerText("Выигрыш = ставка * на бонус", 6, COLOR_TEXT_DIM)
+end
+
+local function drawPayoutTable()
+    local y = 8
+    local lines = {
+        "Если 2 одинаковых предмета по краям - Бонус = x" .. EDGE_MATCH_BONUS,
+        "Если 2 одинаковых предмета рядом - Бонус = x" .. ADJACENT_MATCH_BONUS,
+    }
+    for _, line in ipairs(lines) do
+        centerText(line, y, COLOR_TEXT_DIM)
+        y = y + 1
+    end
+end
+
+local function drawSlots(reels)
+    for i, x in ipairs(slotPositions) do
+        drawBox(x, SLOT_Y, SLOT_SIZE, SLOT_SIZE, COLOR_SLOT_BORDER, COLOR_SLOT_BG)
+
+        local itemId = reels and reels[i]
+        if itemId and loadedIcons[itemId] then
+            local pic = loadedIcons[itemId]
+            local picW, picH = image.getWidth(pic), image.getHeight(pic)
+            local drawX = x + math.floor((SLOT_SIZE - picW) / 2)
+            local drawY = SLOT_Y + math.floor((SLOT_SIZE - picH) / 2)
+            image.draw(drawX, drawY, pic)
+        end
+    end
+end
+
+local function drawSidebar()
+    local x = 2
+    drawBox(x, 4, 24, 14, COLOR_BORDER, COLOR_BG)
+
+    gpu.setForeground(COLOR_TEXT)
+    gpu.setBackground(COLOR_BG)
+    gpu.set(x + 1, 5, "Общая инфа:")
+    gpu.setForeground(COLOR_TEXT_DIM)
+    gpu.set(x + 1, 7, "Вы играете на свой")
+    gpu.set(x + 1, 8, "страх и риск")
+    gpu.set(x + 1, 9, "Эмы не возвращаются")
+
+    gpu.setForeground(COLOR_TEXT)
+    gpu.set(x + 1, 11, "Всего истрачено:")
+    gpu.setForeground(COLOR_WHITE)
+    gpu.set(x + 1, 12, tostring(totalWagered) .. " эм.")
+
+    gpu.setForeground(COLOR_TEXT)
+    gpu.set(x + 1, 14, "Всего выиграно:")
+    gpu.setForeground(COLOR_WHITE)
+    gpu.set(x + 1, 15, tostring(totalWon) .. " эм.")
+end
+
+local function drawBalanceBar()
+    local y = screenH - 1
+    centerText("Баланс: " .. balance .. " эм.   |   Крутим на " .. currentBet .. "$", y, COLOR_WHITE)
+end
+
+local function drawButtons()
+    buttons = {}
+
+    local labels = {
+        {text = "-10$", delta = -BET_STEP_BIG},
+        {text = "-5$",  delta = -BET_STEP_MED},
+        {text = "-1$",  delta = -BET_STEP_SMALL},
+        {text = "Ставка " .. currentBet .. "$", action = "spin"},
+        {text = "+1$",  delta = BET_STEP_SMALL},
+        {text = "+5$",  delta = BET_STEP_MED},
+        {text = "+10$", delta = BET_STEP_BIG},
+    }
+
+    local totalWidth = 0
+    local widths = {}
+    for _, btn in ipairs(labels) do
+        local w = #btn.text + 4
+        table.insert(widths, w)
+        totalWidth = totalWidth + w + 1
+    end
+    totalWidth = totalWidth - 1
+
+    local startX = math.floor((screenW - totalWidth) / 2) + 1
+    local y = screenH - 3
+
+    local x = startX
+    for i, btn in ipairs(labels) do
+        local w = widths[i]
+        drawBox(x, y, w, 3, COLOR_BUTTON_BORDER, COLOR_BUTTON_BG)
+        gpu.setForeground(COLOR_WHITE)
+        gpu.setBackground(COLOR_BUTTON_BG)
+        local textX = x + math.floor((w - #btn.text) / 2)
+        gpu.set(textX, y + 1, btn.text)
+
+        table.insert(buttons, {
+            x1 = x, y1 = y, x2 = x + w - 1, y2 = y + 2,
+            delta = btn.delta, action = btn.action,
+        })
+
+        x = x + w + 1
+    end
+end
+
+local function fullRedraw(reels)
+    drawHeader()
+    drawPayoutTable()
+    drawSidebar()
+    drawSlots(reels)
+    drawBalanceBar()
+    drawButtons()
+end
+
+-- ===================== АНИМАЦИЯ ПРОКРУТКИ =====================
+
+local function animateSpin(finalReels)
+    local steps = 8
+    for step = 1, steps do
+        local tempReels = {}
+        for i = 1, 3 do
+            if step >= steps - (i - 1) then
+                tempReels[i] = finalReels[i]
+            else
+                tempReels[i] = pickRandomItem()
+            end
+        end
+        drawSlots(tempReels)
+        os.sleep(0.08)
+    end
+end
+
+-- ===================== ОБРАБОТКА СТАВКИ =====================
+
+local lastReels = {"iron", "iron", "iron"}
+
+local function doSpin()
+    if balance < currentBet then
+        centerText("Недостаточно средств!", screenH - 5, 0xFF5555)
+        os.sleep(1)
+        fullRedraw(lastReels)
+        return
+    end
+
+    balance = balance - currentBet
+    totalWagered = totalWagered + currentBet
+
+    local reels = {pickRandomItem(), pickRandomItem(), pickRandomItem()}
+
+    animateSpin(reels)
+
+    local bonus, winAmount = calculateWin(reels, currentBet)
+
+    balance = balance + winAmount
+    totalWon = totalWon + winAmount
+    lastReels = reels
+
+    saveBalance()
+
+    fullRedraw(reels)
+
+    if winAmount > 0 then
+        centerText("Выигрыш: " .. winAmount .. " эм. (x" .. bonus .. ")", screenH - 5, 0x55FF55)
+    else
+        centerText("Не повезло. Попробуй ещё раз!", screenH - 5, COLOR_TEXT_DIM)
+    end
+end
+
+local function changeBet(delta)
+    currentBet = currentBet + delta
+    if currentBet < MIN_BET then currentBet = MIN_BET end
+    if currentBet > MAX_BET then currentBet = MAX_BET end
+    fullRedraw(lastReels)
+end
+
+-- ===================== ГЛАВНЫЙ ЦИКЛ =====================
+
+local function findButtonAt(x, y)
+    for _, btn in ipairs(buttons) do
+        if x >= btn.x1 and x <= btn.x2 and y >= btn.y1 and y <= btn.y2 then
+            return btn
+        end
+    end
+    return nil
+end
+
+local function main()
+    loadBalance()
+    loadIcons()
+
+    local maxW, maxH = gpu.maxResolution()
+    gpu.setResolution(maxW, maxH)
+    screenW, screenH = gpu.getResolution()
+
+    -- Пересчитываем позиции слотов и кнопок под реальное разрешение
+    SLOT_START_X = math.floor(screenW / 2) - math.floor((SLOT_SIZE * 3 + SLOT_GAP * 2) / 2)
+    slotPositions = {
+        SLOT_START_X,
+        SLOT_START_X + SLOT_SIZE + SLOT_GAP,
+        SLOT_START_X + (SLOT_SIZE + SLOT_GAP) * 2,
+    }
+
+    fullRedraw(lastReels)
+
+    while true do
+        local eventName, _, x, y = event.pull("touch")
+
+        if eventName == "touch" then
+            local btn = findButtonAt(x, y)
+            if btn then
+                if btn.action == "spin" then
+                    doSpin()
+                elseif btn.delta then
+                    changeBet(btn.delta)
+                end
+            end
+        end
+
+        -- Выход по Ctrl+C / клавише выхода обрабатывается стандартным прерыванием OpenOS
+    end
+end
+
+local ok, err = pcall(main)
+if not ok then
+    saveBalance()
+    io.stderr:write("Casino crashed: " .. tostring(err) .. "\n")
+end
