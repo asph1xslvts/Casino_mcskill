@@ -218,9 +218,8 @@ end
 
 local function clearSlotInterior(x)
     gpu.setBackground(COLOR_SLOT_BG)
-    for row = SLOT_Y + 1, SLOT_Y + SLOT_H - 2 do
-        gpu.set(x + 1, row, string.rep(" ", SLOT_W - 2))
-    end
+    -- Используем эффективный gpu.fill для очистки внутренностей слота одной операцией
+    gpu.fill(x + 1, SLOT_Y + 1, SLOT_W - 2, SLOT_H - 2, " ")
 end
 
 local function drawSlotFrame(x)
@@ -234,11 +233,9 @@ local function drawSlotFrame(x)
     end
 end
 
--- ВОЗВРАЩЕНА ОРИГИНАЛЬНАЯ РАБОЧАЯ ОТРИСОВКА ИКОНОК
-local function drawIconCentered(x, itemId, skipClear)
-    if not skipClear then
-        clearSlotInterior(x)
-    end
+-- ИСПРАВЛЕНО: Чистая отрисовка без наложений и без обрезания картинок
+local function drawIconCentered(x, itemId)
+    clearSlotInterior(x) -- Чистим внутренность перед выводом, чтобы иконки не наслаивались
     local pic = itemId and loadedIcons[itemId]
     if pic then
         local picW, picH = image.getWidth(pic), image.getHeight(pic)
@@ -315,11 +312,10 @@ local function initIconBuffers()
     return true
 end
 
-local function blitFrame(items, isSpinning)
+local function blitFrame(items)
     if not (buffersReady and compositeBuffer) then
         for i, x in ipairs(slotPositions) do
-            -- Во время кручения не очищаем фон полностью, картинка ляжет поверх старой без мигания
-            drawIconCentered(x, items[i], isSpinning)
+            drawIconCentered(x, items[i])
         end
         return
     end
@@ -337,7 +333,7 @@ local function blitFrame(items, isSpinning)
 
     if not ok then
         for i, x in ipairs(slotPositions) do
-            drawIconCentered(x, items[i], isSpinning)
+            drawIconCentered(x, items[i])
         end
     end
 end
@@ -349,7 +345,7 @@ local function drawSlots(reels)
             gpu.set(x, row, string.rep(" ", SLOT_W))
         end
         local itemId = reels and reels[i]
-        drawIconCentered(x, itemId, false)
+        drawIconCentered(x, itemId)
     end
 end
 
@@ -450,8 +446,8 @@ end
 
 local TOTAL_SPIN_TIME = 2.4
 local REEL_STOP_STAGGER = 0.6
-local SWAP_START = 0.07      -- Смена кадров стала чуть плавнее
-local SWAP_END   = 0.20       
+local SWAP_START = 0.06      
+local SWAP_END   = 0.18       
 
 local function animateSpin(finalReels)
     local reelStopTime = {}
@@ -480,16 +476,14 @@ local function animateSpin(finalReels)
                     frame[i] = pickRandomItem()   
                 end
             end
-            blitFrame(frame, true) -- Передаем true, чтобы не чистить фон до дыр
+            blitFrame(frame)
             nextSwap = now + swapInterval
         end
 
-        -- Небольшая разгрузка для процессора
         os.sleep(0.02)
     end
 
-    -- Финальный точный кадр с полной очисткой
-    blitFrame(finalReels, false)
+    blitFrame(finalReels)
 end
 
 -- ===================== ОБРАБОТКА СТАВКИ =====================
@@ -540,7 +534,7 @@ local function doSpin()
         centerText("ВЫИГРЫШ: " .. winAmount .. " $ (x" .. bonus .. ")", SLOT_Y + SLOT_H + 3, COLOR_MONEY)
     else
         centerText("Не повезло. Попробуй ещё раз!", SLOT_Y + SLOT_H + 3, COLOR_LOSE)
-  end
+    end
 end
 
 local function changeBet(delta)
