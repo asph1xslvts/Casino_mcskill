@@ -141,12 +141,8 @@ local COLOR_BUTTON_BORDER = 0x00F0FF  -- циан: рамки кнопок
 
 local screenW, screenH = gpu.getResolution()
 
--- Слот: ширина в столбцах и высота в строках заданы РАЗДЕЛЬНО.
--- Символ экрана примерно вдвое выше своей ширины, а image.draw кладёт иконку
--- 16x16 пикселей в 16 столбцов и ~8 строк (полупиксельные символы). Поэтому
--- для квадратного вида на экране высота слота в строках должна быть ~ ширина/2.
-local SLOT_W = 20            -- ширина слота в символах (16px иконка + рамка/поля)
-local SLOT_H = 12            -- высота слота в строках (квадрат на экране)
+local SLOT_W = 20            
+local SLOT_H = 12            
 local PAYOUT_TABLE_END_Y = 17
 local SLOT_Y = PAYOUT_TABLE_END_Y + 4
 local SLOT_GAP = 4
@@ -160,7 +156,6 @@ local slotPositions = {
 
 local buttons = {}
 
--- ASCII-рамка (= - + |) в неоне. Заливка фоном bgColor, контур borderColor.
 local function drawBox(x, y, w, h, borderColor, bgColor)
     gpu.setBackground(bgColor)
     for row = y, y + h - 1 do
@@ -239,12 +234,14 @@ local function drawSlotFrame(x)
     end
 end
 
-local function drawIconCentered(x, itemId)
-    clearSlotInterior(x)
+-- ВОЗВРАЩЕНА ОРИГИНАЛЬНАЯ РАБОЧАЯ ОТРИСОВКА ИКОНОК
+local function drawIconCentered(x, itemId, skipClear)
+    if not skipClear then
+        clearSlotInterior(x)
+    end
     local pic = itemId and loadedIcons[itemId]
     if pic then
         local picW, picH = image.getWidth(pic), image.getHeight(pic)
-        -- picH у image — в пикселях; на экране иконка занимает picH/2 строк
         local drawX = x + math.floor((SLOT_W - picW) / 2)
         local drawY = SLOT_Y + math.floor((SLOT_H - math.ceil(picH / 2)) / 2)
         image.draw(drawX, drawY, pic)
@@ -253,9 +250,6 @@ local function drawIconCentered(x, itemId)
 end
 
 -- ===================== ДВОЙНАЯ БУФЕРИЗАЦИЯ ДЛЯ АНИМАЦИИ =====================
--- Один bitblt на экран за кадр: иконки собираются в композитный буфер закадрово,
--- затем весь композит выводится одной операцией. Это убирает обрыв/мерцание
--- среднего и правого слота при быстрой смене кадров.
 
 local iconBuffers = {}
 local compositeBuffer = nil
@@ -321,10 +315,11 @@ local function initIconBuffers()
     return true
 end
 
-local function blitFrame(items)
+local function blitFrame(items, isSpinning)
     if not (buffersReady and compositeBuffer) then
         for i, x in ipairs(slotPositions) do
-            drawIconCentered(x, items[i])
+            -- Во время кручения не очищаем фон полностью, картинка ляжет поверх старой без мигания
+            drawIconCentered(x, items[i], isSpinning)
         end
         return
     end
@@ -342,7 +337,7 @@ local function blitFrame(items)
 
     if not ok then
         for i, x in ipairs(slotPositions) do
-            drawIconCentered(x, items[i])
+            drawIconCentered(x, items[i], isSpinning)
         end
     end
 end
@@ -354,7 +349,7 @@ local function drawSlots(reels)
             gpu.set(x, row, string.rep(" ", SLOT_W))
         end
         local itemId = reels and reels[i]
-        drawIconCentered(x, itemId)
+        drawIconCentered(x, itemId, false)
     end
 end
 
@@ -452,15 +447,11 @@ local function fullRedraw(reels)
 end
 
 -- ===================== АНИМАЦИЯ ПРОКРУТКИ =====================
--- Синхронная смена иконки на месте (без скролла). Барабаны замирают по очереди
--- слева-направо на своих финальных предметах. Кадры гонятся по реальному времени
--- (computer.uptime), а не по фиксированному os.sleep - иначе на тиках сервера 1.7.10
--- кадры выходят неравномерно и картинка рвётся.
 
-local TOTAL_SPIN_TIME = 2.6
-local REEL_STOP_STAGGER = 0.7
-local SWAP_START = 0.045      -- интервал смены иконки в начале (быстро)
-local SWAP_END   = 0.16       -- интервал в конце (замедление, как у барабана)
+local TOTAL_SPIN_TIME = 2.4
+local REEL_STOP_STAGGER = 0.6
+local SWAP_START = 0.07      -- Смена кадров стала чуть плавнее
+local SWAP_END   = 0.20       
 
 local function animateSpin(finalReels)
     local reelStopTime = {}
@@ -471,36 +462,34 @@ local function animateSpin(finalReels)
     local startTime = computer.uptime()
     local finished = {false, false, false}
     local frame = {pickRandomItem(), pickRandomItem(), pickRandomItem()}
-    local nextSwap = 0          -- момент следующей смены иконок (отн. старта)
+    local nextSwap = 0          
 
     while not (finished[1] and finished[2] and finished[3]) do
         local now = computer.uptime() - startTime
 
-        -- Прогресс анимации 0..1 -> текущий интервал смены (растёт к концу = замедление)
         local progress = now / TOTAL_SPIN_TIME
         if progress > 1 then progress = 1 end
         local swapInterval = SWAP_START + (SWAP_END - SWAP_START) * progress
 
-        -- Пора менять иконки? Меняем только ещё крутящиеся барабаны.
         if now >= nextSwap then
             for i = 1, 3 do
                 if now >= reelStopTime[i] then
                     finished[i] = true
                     frame[i] = finalReels[i]
                 else
-                    frame[i] = pickRandomItem()   -- каждый барабан свою — живее
+                    frame[i] = pickRandomItem()   
                 end
             end
-            blitFrame(frame)
+            blitFrame(frame, true) -- Передаем true, чтобы не чистить фон до дыр
             nextSwap = now + swapInterval
         end
 
-        -- Минимальная уступка планировщику: не спим фиксированно, просто отдаём тик,
-        -- чтобы не словить "too long without yielding". Реальный темп задаёт nextSwap.
-        os.sleep(0)
+        -- Небольшая разгрузка для процессора
+        os.sleep(0.02)
     end
 
-    blitFrame(finalReels)
+    -- Финальный точный кадр с полной очисткой
+    blitFrame(finalReels, false)
 end
 
 -- ===================== ОБРАБОТКА СТАВКИ =====================
@@ -526,7 +515,6 @@ local function doSpin()
         return
     end
 
-    -- Снимаем ставку
     balance = balance - currentBet
     totalWagered = totalWagered + currentBet
 
@@ -552,7 +540,7 @@ local function doSpin()
         centerText("ВЫИГРЫШ: " .. winAmount .. " $ (x" .. bonus .. ")", SLOT_Y + SLOT_H + 3, COLOR_MONEY)
     else
         centerText("Не повезло. Попробуй ещё раз!", SLOT_Y + SLOT_H + 3, COLOR_LOSE)
-    end
+  end
 end
 
 local function changeBet(delta)
