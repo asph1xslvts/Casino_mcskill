@@ -153,37 +153,46 @@ end
 local PUSH_DIRECTION = "UP"   -- куда выталкивать (сундук сверху интерфейса)
 
 function economy.withdraw(count)
-    if not (meInterface and database and dbReady) then return 0 end
-    if not count or count <= 0 then return 0 end
+    print("[wd] старт, count=" .. tostring(count))
+    if not (meInterface and database and dbReady) then
+        print("[wd] нет железа: iface=" .. tostring(meInterface ~= nil)
+            .. " db=" .. tostring(database ~= nil) .. " dbReady=" .. tostring(dbReady))
+        return 0
+    end
+    if not count or count <= 0 then print("[wd] count<=0"); return 0 end
 
     busy = true
 
     local available = countCoinsInNetwork()
-    if available <= 0 then busy = false; return 0 end
+    print("[wd] каз в сети=" .. available)
+    if available <= 0 then busy = false; print("[wd] сеть пустая"); return 0 end
     local target = math.min(count, available)
+    print("[wd] target=" .. target)
 
     local delivered = 0
 
-    -- выдаём порциями по 64 (один стак за раз)
     while delivered < target do
         local chunk = math.min(target - delivered, 64)
+        print("[wd] chunk=" .. chunk)
 
-        -- 1. сеть кладёт chunk монет "каз" в слот интерфейса
-        pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, chunk)
+        local okc = pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, chunk)
+        print("[wd] setConfig ok=" .. tostring(okc))
 
-        -- 2. пауза, чтобы сеть успела наполнить слот (как в рабочем тесте)
         os.sleep(1.5)
 
-        -- 3. выталкиваем из слота в сундук сверху
+        local c = nil
+        pcall(function() c = meInterface.getInterfaceConfiguration(IFACE_SLOT) end)
+        print("[wd] в слоте: " .. (c and (tostring(c.label) .. " x" .. tostring(c.size)) or "ПУСТО"))
+
         local moved = 0
         local ok, res = pcall(meInterface.pushItem, PUSH_DIRECTION, IFACE_SLOT, chunk)
+        print("[wd] pushItem ok=" .. tostring(ok) .. " res=" .. tostring(res))
         if ok and type(res) == "number" then moved = res end
 
         delivered = delivered + moved
-        if moved == 0 then break end   -- ничего не вышло - прекращаем
+        if moved == 0 then print("[wd] moved=0, выход"); break end
     end
 
-    -- сброс конфигурации
     pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
 
     knownCoins = countCoinsInNetwork()
@@ -191,6 +200,7 @@ function economy.withdraw(count)
     balance = balance - delivered
 
     busy = false
+    print("[wd] итого выдано=" .. delivered)
     return delivered
 end
 
