@@ -96,7 +96,7 @@ function economy.addWin(amount)
     end
 end
 
--- ===== VYDACHA (rabochaya svyazka: config -> sleep -> pushItem) =====
+-- ===== VYDACHA (bez cikla, odna porciya - kak rabochiy push.lua) =====
 function economy.withdraw(count)
     if not (meInterface and database and dbReady) then return 0 end
     if not count or count <= 0 then return 0 end
@@ -105,25 +105,24 @@ function economy.withdraw(count)
     local available = countCoins()
     if available <= 0 then busy = false; return 0 end
     local target = math.min(count, available)
+    if target > 64 then target = 64 end   -- za raz odin stak
 
-    local delivered = 0
-    while delivered < target do
-        local chunk = math.min(target - delivered, 64)
-        pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, chunk)
-        os.sleep(1.5)
-        local moved = 0
-        local ok, res = pcall(meInterface.pushItem, PUSH_DIR, IFACE_SLOT, chunk)
-        if ok and type(res) == "number" then moved = res end
-        delivered = delivered + moved
-        if moved == 0 then break end
-    end
-
+    -- 1. set kladet target monet kaz v slot interfeysa
+    pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, target)
+    -- 2. pauza chtob set napolnila slot
+    os.sleep(2)
+    -- 3. vytalkivaem v sunduk sverhu
+    local moved = 0
+    local ok, res = pcall(meInterface.pushItem, PUSH_DIR, IFACE_SLOT, target)
+    if ok and type(res) == "number" then moved = res end
+    -- 4. sbros
     pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
+
     knownCoins = countCoins()
-    if delivered > balance then delivered = balance end
-    balance = balance - delivered
+    if moved > balance then moved = balance end
+    balance = balance - moved
     busy = false
-    return delivered
+    return moved
 end
 
 function economy.shutdown()
