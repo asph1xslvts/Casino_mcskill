@@ -90,7 +90,16 @@ function economy.setup()
 
     if not meController then return false, "ME Controller не найден" end
     if not meInterface  then return false, "ME Interface не найден" end
-    -- database больше не обязательна: выдача идёт через exportItem напрямую
+    if not database     then return false, "Database (адаптер+база) не найдена" end
+
+    -- очистим слот конфигурации интерфейса на старте
+    pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
+
+    -- сохраним образец монеты "каз" в базу (нужен для адресации NBT-монеты)
+    dbReady = prepareCoinSample()
+    if not dbReady then
+        return false, "Не удалось сохранить образец 'каз' (положи каз в сеть)"
+    end
 
     knownCoins = countCoinsInNetwork()
     return true
@@ -136,35 +145,46 @@ function economy.addWin(amount)
     end
 end
 
--- ===================== ВЫДАЧА (через exportItem в сундук сверху) =====================
+-- ===================== ВЫДАЧА (config + pushItem в сундук сверху) =====================
+-- exportItem не работает с NBT-монетой "каз" (нужен nbt_hash, недоступен).
+-- Зато setInterfaceConfiguration находит "каз" по образцу из database и кладёт
+-- в слот интерфейса, а pushItem выталкивает из слота в сундук сверху (UP).
 
--- Выдать count монет "каз" в сундук сверху (direction UP).
--- Возвращает сколько реально выдано.
+local PUSH_DIRECTION = "UP"   -- куда выталкивать (сундук сверху интерфейса)
+
 function economy.withdraw(count)
-    if not meInterface then return 0 end
+    if not (meInterface and database and dbReady) then return 0 end
     if not count or count <= 0 then return 0 end
 
     busy = true
 
-    -- сколько именно "каз" в сети (по label) - не выдаём больше
     local available = countCoinsInNetwork()
     if available <= 0 then busy = false; return 0 end
     local target = math.min(count, available)
 
-    -- фингерпринт монеты: id + damage (nbt_hash недоступен в этой версии,
-    -- поэтому страхуемся лимитом target = число "каз" в сети)
-    local fingerprint = {id = COIN_NAME, dmg = 0}
-
     local delivered = 0
-    local ok, moved = pcall(meInterface.exportItem, fingerprint, "UP", target)
-    if ok then
-        -- exportItem может вернуть число или таблицу с полем size/count
-        if type(moved) == "number" then
-            delivered = moved
-        elseif type(moved) == "table" then
-            delivered = moved.size or moved.count or moved.n or 0
-        end
+
+    -- выдаём порциями по 64 (один стак за раз)
+    while delivered < target do
+        local chunk = math.min(target - delivered, 64)
+
+        -- 1. сеть кладёт chunk монет "каз" в слот интерфейса
+        pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, chunk)
+
+        -- 2. пауза, чтобы сеть успела наполнить слот (как в рабочем тесте)
+        os.sleep(1.5)
+
+        -- 3. выталкиваем из слота в сундук сверху
+        local moved = 0
+        local ok, res = pcall(meInterface.pushItem, PUSH_DIRECTION, IFACE_SLOT, chunk)
+        if ok and type(res) == "number" then moved = res end
+
+        delivered = delivered + moved
+        if moved == 0 then break end   -- ничего не вышло - прекращаем
     end
+
+    -- сброс конфигурации
+    pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
 
     knownCoins = countCoinsInNetwork()
     if delivered > balance then delivered = balance end
