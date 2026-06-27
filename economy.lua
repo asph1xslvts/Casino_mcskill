@@ -96,31 +96,39 @@ function economy.addWin(amount)
     end
 end
 
--- ===== VYDACHA (pryamye vyzovy bez pcall - kak rabochiy ruchnoy test) =====
+-- ===== VYDACHA =====
 function economy.withdraw(count)
-    if not (meInterface and database) then return 0 end
-    if not count or count <= 0 then return 0 end
+    print("VER7 старт count=" .. tostring(count))
+    if not (meInterface and database) then print("VER7 нет железа"); return 0 end
+    if not count or count <= 0 then print("VER7 count<=0"); return 0 end
     busy = true
 
     local available = countCoins()
-    if available <= 0 then busy = false; return 0 end
+    print("VER7 available=" .. available)
+    if available <= 0 then busy = false; print("VER7 сеть пуста"); return 0 end
     local target = math.min(count, available)
     if target > 64 then target = 64 end
+    print("VER7 target=" .. target)
 
-    -- 1. nastraivaem slot (pryamoy vyzov, bez pcall)
+    print("VER7 db.address=" .. tostring(database.address))
     meInterface.setInterfaceConfiguration(IFACE_SLOT, database.address, DB_SLOT, target)
-    -- 2. pauza
+    print("VER7 config поставлен, жду 2с")
     os.sleep(2)
-    -- 3. vytalkivaem v sunduk sverhu (pryamoy vyzov)
+
+    local c = meInterface.getInterfaceConfiguration(IFACE_SLOT)
+    print("VER7 в слоте: " .. (c and (tostring(c.label) .. " x" .. tostring(c.size)) or "ПУСТО"))
+
     local moved = meInterface.pushItem(PUSH_DIR, IFACE_SLOT, target)
+    print("VER7 pushItem вернул=" .. tostring(moved))
     if type(moved) ~= "number" then moved = 0 end
-    -- 4. sbros
+
     meInterface.setInterfaceConfiguration(IFACE_SLOT)
 
     knownCoins = countCoins()
     if moved > balance then moved = balance end
     balance = balance - moved
     busy = false
+    print("VER7 итого moved=" .. moved)
     return moved
 end
 
