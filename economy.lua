@@ -12,7 +12,7 @@ local COIN_LABEL = "каз"  -- imya nashey monety
 local IFACE_SLOT = 1
 local DB_SLOT    = 1
 local PUSH_DIR   = "up"  -- VAZHNO: strochnymi! "UP" ne rabotal — pushItem tiho ignoriroval nevalidnuyu storonu
-local FILL_TIMEOUT = 5  -- max sekund zhdat zapolneniya slota interfeysa
+local FILL_TIMEOUT = 2  -- pauza (sek) chtoby set uspela dovezti monety v slot interfeysa
 
 -- ===== SOSTOYANIE =====
 local meController, meInterface, database
@@ -97,19 +97,12 @@ function economy.addWin(amount)
     end
 end
 
--- ===== SKOLKO MONET SEYCHAS V SLOTE INTERFEYSA =====
-local function interfaceSlotCount()
-    local ok, stack = pcall(meInterface.getStackInSlot, IFACE_SLOT)
-    if not ok or type(stack) ~= "table" then return 0 end
-    return stack.size or 0
-end
-
 -- ===== VYDACHA =====
--- Klyuchevoy fix: ne tolkaem srazu posle fixed os.sleep(2) (eto i davalo
--- "vse monety razom", esli set uspevala nakopit bolshe chem nado, ili
--- naoborot 0, esli set ne uspevala nakopit nuzhnoe kolichestvo).
--- Teper zhdem poka v slote interfeysa nakopitsya ROVNO stolko, skolko
--- zaprosili (s taymautom), i tolko togda delaem pushItem na eto kolichestvo.
+-- VAZHNO: ranshe zdes byla proverka cherez getStackInSlot(), no etot metod
+-- u tvoego me_interface vsegda vozvrashchal nil (podtverzhdeno diagnostikoy),
+-- poetomu inSlot vsegda byl 0 i toPush vsegda byl 0 -> moved vsegda 0.
+-- Teper prosto zhdem fixed FILL_TIMEOUT (sety dostatochno dlya nebolshih
+-- kolichestv) i tolkaem napryamuyu na "target", doveryaya setInterfaceConfiguration.
 function economy.withdraw(count)
     if not (meInterface and database) then return 0 end
     if not count or count <= 0 then return 0 end
@@ -123,26 +116,15 @@ function economy.withdraw(count)
     -- 1. nastraivaem slot na rovno "target" shtuk
     meInterface.setInterfaceConfiguration(IFACE_SLOT, database.address, DB_SLOT, target)
 
-    -- 2. zhdem, poka set realno dovezet nuzhnoe kolichestvo v slot interfeysa
-    --    (vmesto fixed os.sleep, kotoryy ne uchityval skorost seti)
-    local deadline = computer.uptime() + FILL_TIMEOUT
-    local inSlot = 0
-    while computer.uptime() < deadline do
-        inSlot = interfaceSlotCount()
-        if inSlot >= target then break end
-        os.sleep(0.1)
-    end
+    -- 2. pauza, chtoby set uspela dovezti monety v slot interfeysa
+    os.sleep(FILL_TIMEOUT)
 
-    -- 3. tolkaem v sunduk sverhu rovno to, chto realno v slote (ne bolshe target)
-    local toPush = math.min(inSlot, target)
-    local moved = 0
-    if toPush > 0 then
-        moved = meInterface.pushItem(PUSH_DIR, IFACE_SLOT, toPush)
-        if type(moved) ~= "number" then moved = 0 end
-    end
+    -- 3. tolkaem v sunduk sverhu rovno "target" (pushItem sam vozvratit
+    --    realnoe peremeschennoe kolichestvo, esli v slote bylo menshe)
+    local moved = meInterface.pushItem(PUSH_DIR, IFACE_SLOT, target)
+    if type(moved) ~= "number" then moved = 0 end
 
-    -- 4. sbros konfiguratsii slota (vazhno: imenno teper, posle push,
-    --    chtoby set ne prodolzhala dosypat slot poka my eshche tolkaem)
+    -- 4. sbros konfiguratsii slota
     meInterface.setInterfaceConfiguration(IFACE_SLOT)
 
     knownCoins = countCoins()
