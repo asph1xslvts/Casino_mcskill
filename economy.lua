@@ -1,5 +1,5 @@
 -- economy.lua - ekonomika kazino cherez ME-set (moneta kaz)
--- Vydacha: setInterfaceConfiguration + pushItem UP (proverennaya rabochaya svyazka)
+-- Vydacha: setInterfaceConfiguration + pushItem (s podrobnym debug-logom)
 
 local component = require("component")
 local computer  = require("computer")
@@ -11,8 +11,9 @@ local COIN_NAME  = "IC2:itemCoin"
 local COIN_LABEL = "каз"  -- imya nashey monety
 local IFACE_SLOT = 1
 local DB_SLOT    = 1
-local PUSH_DIR   = "up"  -- VAZHNO: strochnymi! "UP" ne rabotal — pushItem tiho ignoriroval nevalidnuyu storonu
-local FILL_TIMEOUT = 2  -- pauza (sek) chtoby set uspela dovezti monety v slot interfeysa
+local PUSH_DIR   = "up"   -- strochnymi! podtverzhdeno diagnostikoy chto rabotaet
+local FILL_DELAY = 2      -- pauza (sek) chtoby set uspela dovezti monety v slot interfeysa
+local DEBUG      = true   -- vyvodit podrobnyy log kazhdogo shaga withdraw v konsol
 
 -- ===== SOSTOYANIE =====
 local meController, meInterface, database
@@ -20,6 +21,10 @@ local balance, totalWagered, totalWon = 0, 0, 0
 local knownCoins = 0
 local busy = false
 local dbReady = false
+
+local function log(...)
+    if DEBUG then print("[economy]", ...) end
+end
 
 -- ===== CHTENIE SETI =====
 local function countCoins()
@@ -53,10 +58,23 @@ function economy.setup()
     if not meController then return false, "ME Controller ne nayden" end
     if not meInterface  then return false, "ME Interface ne nayden" end
     if not database     then return false, "Database ne naydena" end
+
+    log("setup: meController=" .. tostring(meController.address))
+    log("setup: meInterface=" .. tostring(meInterface.address))
+    log("setup: database=" .. tostring(database.address))
+
     pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
     dbReady = prepareSample()
+    log("setup: dbReady=" .. tostring(dbReady))
     if not dbReady then return false, "Obrazec kaz ne sohranen (polozhi kaz v set)" end
+
+    local got = database.get(DB_SLOT)
+    if got then
+        log("setup: obrazec v DB -> label=" .. tostring(got.label) .. " name=" .. tostring(got.name) .. " hasTag=" .. tostring(got.hasTag))
+    end
+
     knownCoins = countCoins()
+    log("setup: knownCoins=" .. knownCoins)
     return true
 end
 
@@ -97,40 +115,75 @@ function economy.addWin(amount)
     end
 end
 
--- ===== VYDACHA =====
--- VAZHNO: ranshe zdes byla proverka cherez getStackInSlot(), no etot metod
--- u tvoego me_interface vsegda vozvrashchal nil (podtverzhdeno diagnostikoy),
--- poetomu inSlot vsegda byl 0 i toPush vsegda byl 0 -> moved vsegda 0.
--- Teper prosto zhdem fixed FILL_TIMEOUT (sety dostatochno dlya nebolshih
--- kolichestv) i tolkaem napryamuyu na "target", doveryaya setInterfaceConfiguration.
+-- ===== VYDACHA (s podrobnym logom kazhdogo shaga) =====
 function economy.withdraw(count)
-    if not (meInterface and database) then return 0 end
-    if not count or count <= 0 then return 0 end
+    log("withdraw: vyzov s count=" .. tostring(count))
+
+    if not (meInterface and database) then
+        log("withdraw: OTKAZ - meInterface ili database otsutstvuet")
+        return 0
+    end
+    if not count or count <= 0 then
+        log("withdraw: OTKAZ - nevalidnyy count")
+        return 0
+    end
+    if busy then
+        log("withdraw: OTKAZ - busy=true (predыdushchaya operatsiya ne zavershena)")
+        return 0
+    end
+
     busy = true
 
     local available = countCoins()
-    if available <= 0 then busy = false; return 0 end
+    log("withdraw: monet v seti dostupno=" .. available)
+    if available <= 0 then
+        log("withdraw: OTKAZ - 0 monet v seti")
+        busy = false
+        return 0
+    end
+
     local target = math.min(count, available)
     if target > 64 then target = 64 end
+    log("withdraw: target (skolko hotim vydat)=" .. target)
 
-    -- 1. nastraivaem slot na rovno "target" shtuk
-    meInterface.setInterfaceConfiguration(IFACE_SLOT, database.address, DB_SLOT, target)
+    -- 1. nastraivaem slot interfeysa
+    local ok1, err1 = pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT, database.address, DB_SLOT, target)
+    log("withdraw: setInterfaceConfiguration ok=" .. tostring(ok1) .. " err=" .. tostring(err1))
 
     -- 2. pauza, chtoby set uspela dovezti monety v slot interfeysa
-    os.sleep(FILL_TIMEOUT)
+    log("withdraw: zhdem " .. FILL_DELAY .. " sek...")
+    os.sleep(FILL_DELAY)
 
-    -- 3. tolkaem v sunduk sverhu rovno "target" (pushItem sam vozvratit
-    --    realnoe peremeschennoe kolichestvo, esli v slote bylo menshe)
-    local moved = meInterface.pushItem(PUSH_DIR, IFACE_SLOT, target)
-    if type(moved) ~= "number" then moved = 0 end
+    -- 3. tolkaem v sunduk
+    local ok2, moved = pcall(meInterface.pushItem, PUSH_DIR, IFACE_SLOT, target)
+    log("withdraw: pushItem ok=" .. tostring(ok2) .. " moved=" .. tostring(moved) .. " (dir=" .. PUSH_DIR .. ", slot=" .. IFACE_SLOT .. ", target=" .. target .. ")")
+
+    if not ok2 or type(moved) ~= "number" then
+        log("withdraw: pushItem NE vernul chislo, schitaem moved=0")
+        moved = 0
+    end
 
     -- 4. sbros konfiguratsii slota
-    meInterface.setInterfaceConfiguration(IFACE_SLOT)
+    local ok3, err3 = pcall(meInterface.setInterfaceConfiguration, IFACE_SLOT)
+    log("withdraw: sbros konfiguratsii ok=" .. tostring(ok3) .. " err=" .. tostring(err3))
 
-    knownCoins = countCoins()
+    local afterNet = countCoins()
+    log("withdraw: monet v seti POSLE=" .. afterNet .. " (do bylo " .. available .. ", raznitsa=" .. (available - afterNet) .. ")")
+
+    -- esli pushItem vernul 0, no monety iz seti realno ushli (raznitsa > 0),
+    -- doveryaem faktu, a ne vozvratu funktsii (byvayut versii OC gde pushItem
+    -- vozvrashchaet ne to chislo, no fizicheski predmet peremeshchaet)
+    if moved == 0 and (available - afterNet) > 0 then
+        log("withdraw: pushItem vernul 0, no monety FIZICHESKI ushli iz seti -> korrektiruem moved")
+        moved = available - afterNet
+    end
+
+    knownCoins = afterNet
     if moved > balance then moved = balance end
     balance = balance - moved
     busy = false
+
+    log("withdraw: ITOG moved=" .. moved .. " novyy balance=" .. balance)
     return moved
 end
 
