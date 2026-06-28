@@ -45,13 +45,13 @@ local ADMIN_NICK = "st1amz"      -- кому разрешён выход (тво
 local ICONS = {
     {id = "gold",       path = "/home/icons/gold.pic",       label = "золота",     weight = 28, triple = 10},
     {id = "diamond",    path = "/home/icons/diamond.pic",    label = "алмаза",     weight = 20, triple = 15},
-    {id = "netherstar", path = "/home/icons/netherstar.pic", label = "звезды ада", weight = 15, triple = 25},
-    {id = "icon4",      path = "/home/icons/icon4.pic",      label = "иконки4",    weight = 11, triple = 40},
-    {id = "icon5",      path = "/home/icons/icon5.pic",      label = "иконки5",    weight = 8,  triple = 75},
-    {id = "icon6",      path = "/home/icons/icon6.pic",      label = "иконки6",    weight = 6,  triple = 120},
-    {id = "icon7",      path = "/home/icons/icon7.pic",      label = "иконки7",    weight = 5,  triple = 200},
-    {id = "icon8",      path = "/home/icons/icon8.pic",      label = "иконки8",    weight = 4,  triple = 350},
-    {id = "icon9",      path = "/home/icons/icon9.pic",      label = "иконки9",    weight = 3,  triple = 750},
+    {id = "netherstar", path = "/home/icons/nether_star.pic", label = "звезды ада", weight = 15, triple = 25},
+    {id = "icon4",      path = "/home/icons/crystal_ingot.pic",      label = "кристалл",    weight = 11, triple = 40},
+    {id = "icon5",      path = "/home/icons/emerald.pic",      label = "изумруд",    weight = 8,  triple = 75},
+    {id = "icon6",      path = "/home/icons/iron_ingot.pic",      label = "железо",    weight = 6,  triple = 120},
+    {id = "icon7",      path = "/home/icons/ruby.pic",      label = "рубин",    weight = 5,  triple = 200},
+    {id = "icon8",      path = "/home/icons/nitor.pic",      label = "нитор",    weight = 4,  triple = 350},
+    {id = "icon9",      path = "/home/icons/ender_eye.pic",      label = "око эндера",    weight = 3,  triple = 750},
 }
 
 -- --- из таблицы ICONS автоматически собираются нужные структуры ---
